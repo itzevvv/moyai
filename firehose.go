@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"log/slog"
 	"strings"
@@ -55,10 +54,73 @@ func ConsumeFirehose(ctx context.Context, atClient *xrpc.Client, fcmClient *mess
 					continue
 				}
 
-				_, err = getOperationType(*recordCBOR)
-				if err != nil {
-					logger.Info("decode err", "err", err)
+				params := CollectionParameters{
+					Context:    ctx,
+					AtClient:   atClient,
+					RecordCBOR: recordCBOR,
+					Event:      evt,
+					Logger:     logger,
 				}
+
+				collection, _ := splitRecordPath(op.Path)
+
+				var fcmNotifs []FcmNotif
+
+				switch collection {
+				case "app.bsky.feed.like":
+					notifs, err := HandlePostLike(params)
+					if err != nil {
+						logger.Error("feed.like collection err", "err", err)
+						continue
+					}
+
+					if notifs != nil {
+						logger.Info("detected like")
+						fcmNotifs = append(fcmNotifs, notifs...)
+					}
+				case "app.bsky.graph.follow":
+					notifs, err := HandleFollow(params)
+					if err != nil {
+						logger.Error("graph.follow collection err", "err", err)
+						continue
+					}
+
+					if notifs != nil {
+						logger.Info("detected follow")
+						fcmNotifs = append(fcmNotifs, notifs...)
+					}
+				case "app.bsky.feed.post":
+					notifs, err := HandlePost(params)
+
+					if err != nil {
+						logger.Error("feed.post collection err", "err", err)
+						continue
+					}
+
+					if notifs != nil {
+						logger.Info("detected post")
+						fcmNotifs = append(fcmNotifs, notifs...)
+					}
+				case "app.bsky.feed.repost":
+					notifs, err := HandleRepost(params)
+
+					if err != nil {
+						logger.Error("feed.repost collection err", "err", err)
+						continue
+					}
+
+					if notifs != nil {
+						logger.Info("detected repost")
+						fcmNotifs = append(fcmNotifs, notifs...)
+					}
+				}
+
+				if len(fcmNotifs) > 0 {
+					for _, notif := range fcmNotifs {
+						SendNotif(notif, fcmClient)
+					}
+				}
+
 			}
 			return nil
 		},
@@ -67,14 +129,10 @@ func ConsumeFirehose(ctx context.Context, atClient *xrpc.Client, fcmClient *mess
 	return rsc
 }
 
-func getOperationType(recordCBOR []byte) (any, error) {
-	recordType, err := lexutil.TypeExtract(recordCBOR)
-	if err != nil {
-		return nil, err
-	}
+func splitRecordPath(opPath string) (string, string) {
+	split := strings.Split(opPath, "/")
 
-	fmt.Println("type: " + recordType)
-	return nil, nil
+	return split[0], split[1]
 }
 
 func HandleFollow(params CollectionParameters) ([]FcmNotif, error) {
@@ -83,15 +141,19 @@ func HandleFollow(params CollectionParameters) ([]FcmNotif, error) {
 		return nil, err
 	}
 
-	profile, err := appbsky.ActorGetProfile(params.Context, params.AtClient, params.Event.Repo)
-	if err != nil {
-		return nil, err
-	}
-
 	// make sure person didnt follow themself
 	// (though ngl a notification for this would be funny, maybe unneeded check?)
 	if params.Event.Repo != follow.Subject {
 		tokens, err := GetPushTokensForDid(follow.Subject)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(tokens) < 1 {
+			return nil, nil
+		}
+
+		profile, err := appbsky.ActorGetProfile(params.Context, params.AtClient, params.Event.Repo)
 		if err != nil {
 			return nil, err
 		}
@@ -121,6 +183,93 @@ func HandlePost(params CollectionParameters) ([]FcmNotif, error) {
 		return nil, err
 	}
 
+	if post.Embed != nil && post.Embed.EmbedRecord != nil {
+		uri, err := syntax.ParseATURI(post.Embed.EmbedRecord.Record.Uri)
+		if err != nil {
+			return nil, err
+		}
+
+		// is a quote post
+		if uri.Collection().String() == "app.bsky.feed.post" {
+			parentDid := uri.Authority().DID().String()
+
+			if parentDid == params.Event.Repo {
+				return nil, nil
+			}
+
+			tokens, err := GetPushTokensForDid(parentDid)
+			if err != nil {
+				return nil, err
+			}
+
+			if len(tokens) < 1 {
+				return nil, nil
+			}
+
+			var notifs []FcmNotif
+
+			profile, err := appbsky.ActorGetProfile(params.Context, params.AtClient, params.Event.Repo)
+			if err != nil {
+				return nil, err
+			}
+
+			for _, token := range tokens {
+				notif := FcmNotif{
+					Token: token,
+					Notif: &messaging.Notification{
+						Title: *profile.DisplayName + " quoted your post",
+						Body:  post.Text,
+					},
+				}
+				notifs = append(notifs, notif)
+			}
+
+			return notifs, nil
+		}
+	}
+
+	if post.Reply != nil {
+		uri, err := syntax.ParseATURI(post.Reply.Parent.Uri)
+		if err != nil {
+			return nil, err
+		}
+
+		parentDid := uri.Authority().DID().String()
+
+		if parentDid == params.Event.Repo {
+			return nil, nil
+		}
+
+		tokens, err := GetPushTokensForDid(parentDid)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(tokens) < 1 {
+			return nil, nil
+		}
+
+		var notifs []FcmNotif
+
+		profile, err := appbsky.ActorGetProfile(params.Context, params.AtClient, params.Event.Repo)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, token := range tokens {
+			notif := FcmNotif{
+				Token: token,
+				Notif: &messaging.Notification{
+					Title: *profile.DisplayName + " replied your post",
+					Body:  post.Text,
+				},
+			}
+			notifs = append(notifs, notif)
+		}
+
+		return notifs, nil
+	}
+
 	return nil, nil
 }
 
@@ -132,16 +281,20 @@ func HandlePostLike(params CollectionParameters) ([]FcmNotif, error) {
 
 	likedPostsDid := strings.Split(like.Subject.Uri, "/")[2]
 
-	if likedPostsDid == "did:plc:tshzimytn4vesorvxd45kjn7" {
-		fmt.Println("asuiofjodsfjigojid")
-	}
-
 	// make sure user didnt like their own post
 	if params.Event.Repo != likedPostsDid {
 		uri, err := syntax.ParseATURI(like.Subject.Uri)
 		if err != nil {
-			fmt.Println("ok")
 			return nil, err
+		}
+
+		tokens, err := GetPushTokensForDid(likedPostsDid)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(tokens) < 1 {
+			return nil, nil
 		}
 
 		record, err := atproto.RepoGetRecord(
@@ -155,51 +308,102 @@ func HandlePostLike(params CollectionParameters) ([]FcmNotif, error) {
 
 		data, err := json.Marshal(record.Value)
 		if err != nil {
-			fmt.Println("ok 2")
 			return nil, err
 		}
 
 		var post appbsky.FeedPost
 		err = json.Unmarshal(data, &post)
 		if err != nil {
-			fmt.Println("ok 3")
 			return nil, err
 		}
 
-		if likedPostsDid == "did:plc:tshzimytn4vesorvxd45kjn7" {
-			fmt.Println("detected test did")
+		var notifs []FcmNotif
+
+		profile, err := appbsky.ActorGetProfile(params.Context, params.AtClient, params.Event.Repo)
+		if err != nil {
+			return nil, err
 		}
 
-		var notifs []FcmNotif
+		for _, token := range tokens {
+			notif := FcmNotif{
+				Token: token,
+				Notif: &messaging.Notification{
+					Title: *profile.DisplayName + " liked your post",
+					Body:  post.Text,
+				},
+			}
+			notifs = append(notifs, notif)
+		}
+
+		return notifs, nil
+	}
+
+	return nil, nil
+}
+
+func HandleRepost(params CollectionParameters) ([]FcmNotif, error) {
+	var repost appbsky.FeedRepost
+	if err := repost.UnmarshalCBOR(bytes.NewReader(*params.RecordCBOR)); err != nil {
+		return nil, err
+	}
+
+	likedPostsDid := strings.Split(repost.Subject.Uri, "/")[2]
+
+	// make sure user didnt like their own post
+	if params.Event.Repo != likedPostsDid {
+		uri, err := syntax.ParseATURI(repost.Subject.Uri)
+		if err != nil {
+			return nil, err
+		}
+
 		tokens, err := GetPushTokensForDid(likedPostsDid)
 		if err != nil {
 			return nil, err
 		}
 
-		if len(tokens) > 0 {
-			fmt.Println(" - detected post like for an account; sending notification")
+		if len(tokens) < 1 {
+			return nil, nil
+		}
 
-			profile, err := appbsky.ActorGetProfile(params.Context, params.AtClient, params.Event.Repo)
-			if err != nil {
-				fmt.Println("ok 4")
-				return nil, err
-			}
+		record, err := atproto.RepoGetRecord(
+			params.Context,
+			params.AtClient,
+			repost.Subject.Cid,
+			uri.Collection().String(),
+			uri.Authority().String(),
+			uri.RecordKey().String(),
+		)
 
-			for _, token := range tokens {
-				notif := FcmNotif{
-					Token: token,
-					Notif: &messaging.Notification{
-						Title: *profile.DisplayName + " liked your post",
-						Body:  post.Text,
-					},
-				}
-				notifs = append(notifs, notif)
+		data, err := json.Marshal(record.Value)
+		if err != nil {
+			return nil, err
+		}
+
+		var post appbsky.FeedPost
+		err = json.Unmarshal(data, &post)
+		if err != nil {
+			return nil, err
+		}
+
+		var notifs []FcmNotif
+
+		profile, err := appbsky.ActorGetProfile(params.Context, params.AtClient, params.Event.Repo)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, token := range tokens {
+			notif := FcmNotif{
+				Token: token,
+				Notif: &messaging.Notification{
+					Title: *profile.DisplayName + " reposted your post",
+					Body:  post.Text,
+				},
 			}
+			notifs = append(notifs, notif)
 		}
 
 		return notifs, nil
-	} else {
-		fmt.Println("is same")
 	}
 
 	return nil, nil
