@@ -56,15 +56,12 @@ func XrpcRegisterPushNotifications(w http.ResponseWriter, req *http.Request) {
 
 	// read the bearer token so we know the account associated with the request
 	bearerToken := strings.Split(req.Header["Authorization"][0], " ")[1]
-	fmt.Println("bearer:", bearerToken)
 
 	did, err := VerifyBlueskyJWT(context.Background(), bearerToken)
 	if err != nil {
 		fmt.Println("err:", err)
 		return
 	}
-
-	fmt.Println("fetched did:", did)
 
 	var notif RegisterPushNotificationData
 	err = json.Unmarshal(bytes, &notif)
@@ -74,8 +71,6 @@ func XrpcRegisterPushNotifications(w http.ResponseWriter, req *http.Request) {
 	}
 
 	RegisterPushToken(notif.Token, did)
-
-	fmt.Printf("[register push] received token: %s\n", notif.Token)
 }
 
 func XrpcUnregisterPushNotifications(w http.ResponseWriter, req *http.Request) {

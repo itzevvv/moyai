@@ -14,7 +14,7 @@ type FcmNotif struct {
 
 func SendNotif(notif FcmNotif, fcmClient *messaging.Client) {
 	// return if notification invalid
-	if notif.Notif.Title == "" || notif.Notif.Body == "" {
+	if notif.Notif.Title == "" {
 		return
 	}
 
@@ -24,7 +24,9 @@ func SendNotif(notif FcmNotif, fcmClient *messaging.Client) {
 	})
 
 	if err != nil {
-		fmt.Printf("error sending notif: %v", err)
+		fmt.Printf("error sending notif: %v\n", err)
+		// todo: handle registration-token-not-registered
+
 		return
 	}
 

@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 
 	_ "modernc.org/sqlite"
@@ -54,6 +55,8 @@ func RegisterPushToken(fcmToken string, did string) error {
 			log.Println("Error occurred while attempting to register token")
 			return err
 		}
+
+		fmt.Println("[register push] registered new push token")
 	} else {
 		return errors.New("Fcm token already registered")
 	}
