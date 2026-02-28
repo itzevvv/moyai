@@ -9,6 +9,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+type FcmToken struct {
+	Token    string
+	Platform string
+	Did      string
+}
+
 func CreateAndOpenAccountDb() *sql.DB {
 	db, err := sql.Open("sqlite", "accounts.sqlite")
 	if err != nil {
@@ -21,6 +27,7 @@ func CreateAndOpenAccountDb() *sql.DB {
 CREATE TABLE IF NOT EXISTS
 FcmPushTokens (
 	fcmToken TEXT,
+	platform TEXT,
 	did TEXT
 );`)
 
@@ -37,9 +44,7 @@ FcmPushTokens (
 	return db
 }
 
-func RegisterPushToken(fcmToken string, did string) error {
-	log.Println("registering fcm token")
-
+func RegisterPushToken(fcmToken string, platform string, did string) error {
 	db := CreateAndOpenAccountDb()
 	defer db.Close()
 
@@ -51,7 +56,7 @@ func RegisterPushToken(fcmToken string, did string) error {
 	}
 
 	if amount < 1 {
-		if _, err := db.Exec("INSERT INTO FcmPushTokens (fcmToken, did) VALUES(?, ?);", fcmToken, did); err != nil {
+		if _, err := db.Exec("INSERT INTO FcmPushTokens (fcmToken, platform, did) VALUES(?, ?, ?);", fcmToken, platform, did); err != nil {
 			log.Println("Error occurred while attempting to register token")
 			return err
 		}
@@ -64,7 +69,7 @@ func RegisterPushToken(fcmToken string, did string) error {
 	return nil
 }
 
-func GetPushTokensForDid(did string) ([]string, error) {
+func GetPushTokensForDid(did string) ([]FcmToken, error) {
 	db := CreateAndOpenAccountDb()
 	defer db.Close()
 
@@ -74,16 +79,24 @@ func GetPushTokensForDid(did string) ([]string, error) {
 	}
 	defer rows.Close()
 
-	var tokens []string
+	var tokens []FcmToken
 
 	for rows.Next() {
 		var token string
+		var platform string
 		var uDid string
 
-		if err := rows.Scan(&token, &uDid); err != nil {
+		if err := rows.Scan(&token, &platform, &uDid); err != nil {
 			return tokens, err
 		}
-		tokens = append(tokens, token)
+
+		fcmToken := FcmToken{
+			Token:    token,
+			Platform: platform,
+			Did:      uDid,
+		}
+
+		tokens = append(tokens, fcmToken)
 	}
 	if err = rows.Err(); err != nil {
 		return tokens, err

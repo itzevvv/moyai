@@ -24,6 +24,7 @@ type CollectionParameters struct {
 	AtClient   *xrpc.Client
 	RecordCBOR *[]byte
 	Event      *atproto.SyncSubscribeRepos_Commit
+	Op         *atproto.SyncSubscribeRepos_RepoOp
 	Logger     *slog.Logger
 }
 
@@ -60,6 +61,7 @@ func ConsumeFirehose(ctx context.Context, atClient *xrpc.Client, fcmClient *mess
 					AtClient:   atClient,
 					RecordCBOR: recordCBOR,
 					Event:      evt,
+					Op:         op,
 					Logger:     logger,
 				}
 
@@ -136,6 +138,16 @@ func splitRecordPath(opPath string) (string, string) {
 	return split[0], split[1]
 }
 
+func DisplayNameOrHandle(profile *appbsky.ActorDefs_ProfileViewDetailed) string {
+	text := *profile.DisplayName
+
+	if len(text) < 1 {
+		return profile.Handle
+	}
+
+	return text
+}
+
 func HandleFollow(params CollectionParameters) ([]FcmNotif, error) {
 	var follow appbsky.GraphFollow
 	if err := follow.UnmarshalCBOR(bytes.NewReader(*params.RecordCBOR)); err != nil {
@@ -162,12 +174,19 @@ func HandleFollow(params CollectionParameters) ([]FcmNotif, error) {
 		var notifs []FcmNotif
 
 		for _, token := range tokens {
+			body := *profile.DisplayName
+
+			if len(body) < 1 {
+				body = profile.Handle
+			}
+
 			notif := FcmNotif{
 				Token: token,
-				Notif: &messaging.Notification{
-					Title: "New follower!",
-					Body:  *profile.DisplayName,
-				},
+
+				Title:  "New follower!",
+				Body:   body,
+				Reason: "follow",
+				Url:    "https://bsky.app/notifications",
 			}
 			notifs = append(notifs, notif)
 		}
@@ -217,10 +236,11 @@ func HandlePost(params CollectionParameters) ([]FcmNotif, error) {
 			for _, token := range tokens {
 				notif := FcmNotif{
 					Token: token,
-					Notif: &messaging.Notification{
-						Title: *profile.DisplayName + " quoted your post",
-						Body:  post.Text,
-					},
+
+					Title:  DisplayNameOrHandle(profile) + " quoted your post",
+					Body:   post.Text,
+					Reason: "quote",
+					Url:    "https://bsky.app/profile/" + uri.Authority().DID().String() + "/" + string(uri.RecordKey()),
 				}
 				notifs = append(notifs, notif)
 			}
@@ -256,11 +276,13 @@ func HandlePost(params CollectionParameters) ([]FcmNotif, error) {
 		for _, token := range tokens {
 			notif := FcmNotif{
 				Token: token,
-				Notif: &messaging.Notification{
-					Title: *profile.DisplayName + " replied your post",
-					Body:  post.Text,
-				},
+
+				Title:  DisplayNameOrHandle(profile) + " replied to your post",
+				Body:   post.Text,
+				Reason: "reply",
+				Url:    "https://bsky.app/profile/" + uri.Authority().DID().String() + "/" + string(uri.RecordKey()),
 			}
+
 			notifs = append(notifs, notif)
 		}
 	}
@@ -285,13 +307,17 @@ func HandlePost(params CollectionParameters) ([]FcmNotif, error) {
 				}
 
 				for _, token := range tokens {
+					_, rkey := splitRecordPath(params.Op.Path)
+
 					notif := FcmNotif{
 						Token: token,
-						Notif: &messaging.Notification{
-							Title: *profile.DisplayName + " mentioned you",
-							Body:  post.Text,
-						},
+
+						Title:  DisplayNameOrHandle(profile) + " mentioned you",
+						Body:   post.Text,
+						Reason: "mention",
+						Url:    "https://bsky.app/profile/" + profile.Did + "/" + rkey,
 					}
+
 					notifs = append(notifs, notif)
 				}
 
@@ -326,18 +352,24 @@ func HandlePostLike(params CollectionParameters) ([]FcmNotif, error) {
 				return notifs, err
 			}
 
-			post, err := GetFeedPost(params, like)
+			post, record, err := GetFeedPost(params, like)
 			if err != nil {
 				return notifs, nil
+			}
+
+			uri, err := syntax.ParseATURI(record.Uri)
+			if err != nil {
+				return nil, err
 			}
 
 			for _, token := range tokens {
 				notif := FcmNotif{
 					Token: token,
-					Notif: &messaging.Notification{
-						Title: *profile.DisplayName + " liked your repost",
-						Body:  post.Text,
-					},
+
+					Title:  DisplayNameOrHandle(profile) + " liked your repost",
+					Body:   post.Text,
+					Reason: "like-via-repost",
+					Url:    "https://bsky.app/profile/" + uri.Authority().DID().String() + "/" + string(uri.RecordKey()),
 				}
 				notifs = append(notifs, notif)
 			}
@@ -352,7 +384,7 @@ func HandlePostLike(params CollectionParameters) ([]FcmNotif, error) {
 			return notifs, nil
 		}
 
-		post, err := GetFeedPost(params, like)
+		post, record, err := GetFeedPost(params, like)
 		if err != nil {
 			return notifs, err
 		}
@@ -364,14 +396,21 @@ func HandlePostLike(params CollectionParameters) ([]FcmNotif, error) {
 			return notifs, err
 		}
 
+		uri, err := syntax.ParseATURI(record.Uri)
+		if err != nil {
+			return nil, err
+		}
+
 		for _, token := range tokens {
 			notif := FcmNotif{
 				Token: token,
-				Notif: &messaging.Notification{
-					Title: *profile.DisplayName + " liked your post",
-					Body:  post.Text,
-				},
+
+				Title:  DisplayNameOrHandle(profile) + " liked your post",
+				Body:   post.Text,
+				Reason: "like",
+				Url:    "https://bsky.app/profile/" + uri.Authority().DID().String() + "/" + string(uri.RecordKey()),
 			}
+
 			notifs = append(notifs, notif)
 		}
 
@@ -381,7 +420,7 @@ func HandlePostLike(params CollectionParameters) ([]FcmNotif, error) {
 	return notifs, nil
 }
 
-func GetTokensVia(record any) ([]string, error) {
+func GetTokensVia(record any) ([]FcmToken, error) {
 	var uri syntax.ATURI
 
 	switch record.(type) {
@@ -410,7 +449,7 @@ func GetTokensVia(record any) ([]string, error) {
 	return tokens, nil
 }
 
-func GetFeedPost(params CollectionParameters, record any) (*appbsky.FeedPost, error) {
+func GetFeedPost(params CollectionParameters, record any) (*appbsky.FeedPost, *atproto.RepoGetRecord_Output, error) {
 	var uri syntax.ATURI
 	var cid string
 
@@ -418,7 +457,7 @@ func GetFeedPost(params CollectionParameters, record any) (*appbsky.FeedPost, er
 	case appbsky.FeedRepost:
 		postUri, err := syntax.ParseATURI(record.(appbsky.FeedRepost).Subject.Uri)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		uri = postUri
@@ -426,13 +465,13 @@ func GetFeedPost(params CollectionParameters, record any) (*appbsky.FeedPost, er
 	case appbsky.FeedLike:
 		postUri, err := syntax.ParseATURI(record.(appbsky.FeedLike).Subject.Uri)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		uri = postUri
 		cid = record.(appbsky.FeedLike).Subject.Cid
 	default:
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	repoRecord, err := atproto.RepoGetRecord(
@@ -446,16 +485,16 @@ func GetFeedPost(params CollectionParameters, record any) (*appbsky.FeedPost, er
 
 	data, err := json.Marshal(repoRecord.Value)
 	if err != nil {
-		return nil, err
+		return nil, repoRecord, err
 	}
 
 	var post appbsky.FeedPost
 	err = json.Unmarshal(data, &post)
 	if err != nil {
-		return nil, err
+		return nil, repoRecord, err
 	}
 
-	return &post, nil
+	return &post, repoRecord, nil
 }
 
 func HandleRepost(params CollectionParameters) ([]FcmNotif, error) {
@@ -482,19 +521,26 @@ func HandleRepost(params CollectionParameters) ([]FcmNotif, error) {
 				return notifs, err
 			}
 
-			post, err := GetFeedPost(params, repost)
+			post, record, err := GetFeedPost(params, repost)
 			if err != nil {
 				return notifs, nil
+			}
+
+			uri, err := syntax.ParseATURI(record.Uri)
+			if err != nil {
+				return nil, err
 			}
 
 			for _, token := range tokens {
 				notif := FcmNotif{
 					Token: token,
-					Notif: &messaging.Notification{
-						Title: *profile.DisplayName + " reposted your repost",
-						Body:  post.Text,
-					},
+
+					Title:  DisplayNameOrHandle(profile) + " reposted your repost",
+					Body:   post.Text,
+					Reason: "repost-via-repost",
+					Url:    "https://bsky.app/profile/" + uri.Authority().DID().String() + "/" + string(uri.RecordKey()),
 				}
+
 				notifs = append(notifs, notif)
 			}
 		}
@@ -508,9 +554,14 @@ func HandleRepost(params CollectionParameters) ([]FcmNotif, error) {
 			return notifs, nil
 		}
 
-		post, err := GetFeedPost(params, repost)
+		post, record, err := GetFeedPost(params, repost)
 		if err != nil {
 			return notifs, nil
+		}
+
+		uri, err := syntax.ParseATURI(record.Uri)
+		if err != nil {
+			return nil, err
 		}
 
 		profile, err := appbsky.ActorGetProfile(params.Context, params.AtClient, params.Event.Repo)
@@ -521,10 +572,11 @@ func HandleRepost(params CollectionParameters) ([]FcmNotif, error) {
 		for _, token := range tokens {
 			notif := FcmNotif{
 				Token: token,
-				Notif: &messaging.Notification{
-					Title: *profile.DisplayName + " reposted your post",
-					Body:  post.Text,
-				},
+
+				Title:  DisplayNameOrHandle(profile) + " reposted your post",
+				Body:   post.Text,
+				Reason: "repost",
+				Url:    "https://bsky.app/profile/" + uri.Authority().DID().String() + "/" + string(uri.RecordKey()),
 			}
 			notifs = append(notifs, notif)
 		}

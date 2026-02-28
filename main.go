@@ -70,7 +70,7 @@ func XrpcRegisterPushNotifications(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	RegisterPushToken(notif.Token, did)
+	RegisterPushToken(notif.Token, notif.Platform, did)
 }
 
 func XrpcUnregisterPushNotifications(w http.ResponseWriter, req *http.Request) {

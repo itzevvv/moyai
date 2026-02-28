@@ -8,19 +8,26 @@ import (
 )
 
 type FcmNotif struct {
-	Token string
-	Notif *messaging.Notification
+	Token FcmToken
+
+	Title  string
+	Body   string
+	Reason string
+	Url    string
 }
 
 func SendNotif(notif FcmNotif, fcmClient *messaging.Client) {
 	// return if notification invalid
-	if notif.Notif.Title == "" {
+	if notif.Title == "" {
 		return
 	}
 
 	_, err := fcmClient.Send(context.Background(), &messaging.Message{
-		Notification: notif.Notif,
-		Token:        notif.Token,
+		Notification: &messaging.Notification{
+			Title: notif.Title,
+			Body:  notif.Body,
+		},
+		Token: notif.Token.Token,
 	})
 
 	if err != nil {
@@ -30,5 +37,5 @@ func SendNotif(notif FcmNotif, fcmClient *messaging.Client) {
 		return
 	}
 
-	fmt.Println("sent test notif!!!!!!!!!")
+	fmt.Println("[firebase] firebase notification sent")
 }
